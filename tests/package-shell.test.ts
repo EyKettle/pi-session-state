@@ -27,24 +27,22 @@ afterEach(() => {
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-// Pi loads a subdirectory of the extensions directory only when it declares a
-// non-empty `pi.extensions`, or carries a root `index.ts` / `index.js`
-// (pi-1.1.0 loader.ts -> resolveExtensionEntries). This package must stay
-// invisible to that discovery so it can sit in the extensions tree as a library.
+// package.json declares pi.extensions -> ./src/extension.ts, and no root
+// index.ts / index.js exists, so Pi's discovery (loader.ts ->
+// resolveExtensionEntries) resolves the declared entry alone while the
+// library entry stays importable by consumers.
 describe("package shell", () => {
-  it("has no root extension entry point", () => {
+  it("declares the extension entry and no root entry point", () => {
+    const manifest = JSON.parse(
+      readFileSync(join(packageRoot, "package.json"), "utf8"),
+    ) as { pi?: { extensions?: string[] } };
+    expect(manifest.pi?.extensions).toEqual(["./src/extension.ts"]);
+    expect(existsSync(join(packageRoot, "src", "extension.ts"))).toBe(true);
     expect(existsSync(join(packageRoot, "index.ts"))).toBe(false);
     expect(existsSync(join(packageRoot, "index.js"))).toBe(false);
   });
 
-  it("declares no pi.extensions in the manifest", () => {
-    const manifest = JSON.parse(
-      readFileSync(join(packageRoot, "package.json"), "utf8"),
-    ) as { pi?: { extensions?: string[] } };
-    expect(manifest.pi?.extensions ?? []).toEqual([]);
-  });
-
-  it("Pi's extension discovery skips the package (real pi, isolated agent dir)", () => {
+  it("Pi loads the package through the declared entry (real pi, isolated agent dir)", () => {
     const agentDir = scratch();
     mkdirSync(join(agentDir, "extensions"), { recursive: true });
     symlinkSync(packageRoot, join(agentDir, "extensions", "session-state"));
@@ -67,5 +65,23 @@ describe("package shell", () => {
     const brokenOutput = `${broken.stdout ?? ""}${broken.stderr ?? ""}`;
     expect(brokenOutput).toContain("Failed to load extension");
     expect(broken.status).not.toBe(0);
+
+    // Negative control 2: a package that declares a broken entry proves Pi
+    // loads what a pi.extensions manifest names.
+    const brokenPackage = join(agentDir, "extensions", "broken-package");
+    mkdirSync(brokenPackage, { recursive: true });
+    writeFileSync(
+      join(brokenPackage, "package.json"),
+      JSON.stringify({
+        name: "broken-package",
+        pi: { extensions: ["./broken.ts"] },
+      }),
+    );
+    writeFileSync(join(brokenPackage, "broken.ts"), "export default function (");
+    const brokenManifest = runPi();
+    const brokenManifestOutput = `${brokenManifest.stdout ?? ""}${
+      brokenManifest.stderr ?? ""
+    }`;
+    expect(brokenManifestOutput).toContain("Failed to load extension");
   }, 60_000);
 });

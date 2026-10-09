@@ -12,6 +12,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
