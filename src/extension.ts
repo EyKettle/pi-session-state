@@ -3,6 +3,7 @@ import { getAgentDir } from "../deps/pi-coding-agent.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
+  ExtensionContext,
 } from "../deps/pi-coding-agent.ts";
 import { resolveAgentDatabasePath } from "./settings.ts";
 import { holderIsAlive, openStore, type SessionStore } from "./store.ts";
@@ -33,6 +34,15 @@ function statusLines(
 export default function extension(pi: ExtensionAPI): void {
   const location = resolveAgentDatabasePath(getAgentDir(), homedir());
   const store = openStore(location.path);
+
+  pi.on("session_start", (_event: unknown, ctx: ExtensionContext): void => {
+    if (!ctx.hasUI) return;
+    if (location.configured !== "invalid") return;
+    ctx.ui.notify(
+      `session-state: the sessionState.databasePath setting is not a non-empty string; using the default location ${location.path}`,
+      "warning",
+    );
+  });
 
   pi.registerCommand("state:status", {
     description: "Report this session's lock row and state rows",

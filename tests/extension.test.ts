@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -251,5 +251,54 @@ describe("extension entry", () => {
     await commands.get("state:force-refresh")?.handler("", contextFor("s1", false, messages));
     expect(messages).toHaveLength(0);
     expect(lockHolderAt(path, "s1")).toBe("pid:1");
+  });
+
+  it("reports an unusable configured location at session_start", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: 42 } }),
+    );
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("sessionState.databasePath");
+    expect(messages[0]).toContain(join(dir, "sessions", "states.sqlite"));
+  });
+
+  it("stays silent for a usable or absent configured location", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: join(dir, "custom.sqlite") } }),
+    );
+    const usable = loadExtension();
+    const usableMessages: string[] = [];
+    await usable.events.get("session_start")?.({}, contextFor("s1", true, usableMessages));
+    expect(usableMessages).toHaveLength(0);
+
+    rmSync(join(dir, "settings.json"));
+    const absent = loadExtension();
+    const absentMessages: string[] = [];
+    await absent.events.get("session_start")?.({}, contextFor("s1", true, absentMessages));
+    expect(absentMessages).toHaveLength(0);
+  });
+
+  it("stays silent without a UI even for an unusable location", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: 42 } }),
+    );
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", false, messages));
+    expect(messages).toHaveLength(0);
   });
 });
