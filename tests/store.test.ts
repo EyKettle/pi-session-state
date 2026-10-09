@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -483,5 +483,12 @@ describe("session store", () => {
     });
     expect(lockHolder(path, "s1")).toBe("pid:1");
     expect(sessionRowCount(path, "role", "s1")).toBe(1);
+  });
+
+  it("inspection does not create the database when the file is absent", () => {
+    const { path } = scratch();
+    const store = openStore(path);
+    expect(store.inspectSession("s1")).toEqual({ lock: undefined, rowsByPlugin: [] });
+    expect(existsSync(path)).toBe(false);
   });
 });

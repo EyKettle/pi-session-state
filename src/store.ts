@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { branchKeyFromLeaf, type SessionTreeView } from "./branch.ts";
@@ -264,6 +264,9 @@ export class SessionStore {
   }
 
   inspectSession(sessionId: string): SessionInspection {
+    if (this.#state === undefined && !existsSync(this.#path)) {
+      return { lock: undefined, rowsByPlugin: [] };
+    }
     const { lockSelect, rowsByPlugin } = this.#ready();
     const lockRow = lockSelect.get(sessionId) as
       | { holder: string; acquired_at: number }

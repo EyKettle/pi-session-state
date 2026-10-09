@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -327,5 +327,19 @@ describe("extension entry", () => {
     await events.get("session_start")?.({}, contextFor("s1", true, messages));
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain("~user");
+  });
+
+  it("/state:status does not create the database", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+
+    const messages: string[] = [];
+    await commands.get("state:status")?.handler("", contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("lock: none");
+    expect(messages[0]).toContain("state rows: none");
+    expect(existsSync(path)).toBe(false);
   });
 });
