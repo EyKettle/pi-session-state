@@ -1,0 +1,33 @@
+{
+  "name": "session-state",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Session-scoped, optionally branch-scoped JSON state over one SQLite file, for Pi extensions",
+  "license": "MIT",
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^1.1.0",
+    "@types/node": "^24.0.0",
+    "typescript": "6.0.3",
+    "vitest": "^4.1.11"
+  }
+}
