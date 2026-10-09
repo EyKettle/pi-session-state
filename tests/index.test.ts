@@ -52,8 +52,8 @@ function seedLock(path: string, sessionId: string, holder: string): void {
   const db = new DatabaseSync(path);
   try {
     db.prepare(
-      "INSERT OR REPLACE INTO write_lock (session_id, holder) VALUES (?, ?)",
-    ).run(sessionId, holder);
+      "INSERT OR REPLACE INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)",
+    ).run(sessionId, holder, Date.now());
   } finally {
     db.close();
   }

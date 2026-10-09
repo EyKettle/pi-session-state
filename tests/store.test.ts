@@ -316,7 +316,7 @@ describe("session store", () => {
     store.read(keyOf("p", "seed"), null); // opens the database and its schema
 
     // A live lock holder: pid 1 exists (kill reports EPERM, not ESRCH).
-    rawRun(path, "INSERT INTO write_lock (session_id, holder) VALUES (?, ?)", "s1", "pid:1");
+    rawRun(path, "INSERT INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)", "s1", "pid:1", Date.now());
 
     let refusal: unknown;
     try {
@@ -342,7 +342,7 @@ describe("session store", () => {
     const store = openStore(path);
     store.read(keyOf("p", "seed"), null);
 
-    rawRun(path, "INSERT INTO write_lock (session_id, holder) VALUES (?, ?)", "s1", "pid:999999");
+    rawRun(path, "INSERT INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)", "s1", "pid:999999", Date.now());
     store.write(keyOf("p", "s1"), 1);
     expect(lockHolder(path, "s1")).toBeUndefined();
 
@@ -373,4 +373,45 @@ describe("session store", () => {
 
     await new Promise<void>((resolve) => child.on("close", () => resolve()));
   }, 10000);
+
+  it("takes over an aged lock row even when its pid is alive", () => {
+    const { path } = scratch();
+    const store = openStore(path);
+    store.read(keyOf("p", "seed"), null);
+
+    rawRun(
+      path,
+      "INSERT INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)",
+      "s1",
+      "pid:1",
+      Date.now() - 61_000,
+    );
+    store.write(keyOf("p", "s1"), 1);
+    expect(lockHolder(path, "s1")).toBeUndefined();
+  });
+
+  it("upgrades a database whose write_lock predates the lease column", () => {
+    const { path } = scratch();
+    const legacy = new DatabaseSync(path);
+    try {
+      legacy.exec(
+        "CREATE TABLE write_lock (session_id TEXT PRIMARY KEY, holder TEXT NOT NULL)",
+      );
+      legacy
+        .prepare("INSERT INTO write_lock (session_id, holder) VALUES (?, ?)")
+        .run("s1", "pid:1");
+    } finally {
+      legacy.close();
+    }
+
+    const store = openStore(path);
+    store.write(keyOf("p", "s1"), 1);
+    expect(lockHolder(path, "s1")).toBeUndefined();
+    const column = rawGet(
+      path,
+      "SELECT name FROM pragma_table_info('write_lock') WHERE name = ?",
+      "acquired_at",
+    ) as { name: string } | undefined;
+    expect(column?.name).toBe("acquired_at");
+  });
 });

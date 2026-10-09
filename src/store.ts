@@ -67,8 +67,9 @@ const CREATE_STATE_TABLE = `CREATE TABLE IF NOT EXISTS state (
 )`;
 
 const CREATE_LOCK_TABLE = `CREATE TABLE IF NOT EXISTS write_lock (
-  session_id TEXT PRIMARY KEY,
-  holder     TEXT NOT NULL
+  session_id  TEXT PRIMARY KEY,
+  holder      TEXT NOT NULL,
+  acquired_at INTEGER NOT NULL
 )`;
 
 const SELECT_ROW =
@@ -79,14 +80,20 @@ const DELETE_ROW =
   "DELETE FROM state WHERE plugin_id = ? AND session_id = ? AND branch_id = ?";
 
 const LOCK_INSERT =
-  "INSERT OR IGNORE INTO write_lock (session_id, holder) VALUES (?, ?)";
-const LOCK_SELECT = "SELECT holder FROM write_lock WHERE session_id = ?";
+  "INSERT OR IGNORE INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)";
+const LOCK_SELECT =
+  "SELECT holder, acquired_at FROM write_lock WHERE session_id = ?";
 const LOCK_UPDATE =
-  "UPDATE write_lock SET holder = ? WHERE session_id = ? AND holder = ?";
+  "UPDATE write_lock SET holder = ?, acquired_at = ? WHERE session_id = ? AND holder = ? AND acquired_at = ?";
 const LOCK_DELETE = "DELETE FROM write_lock WHERE session_id = ? AND holder = ?";
 
 // Cross-session contention waits on SQLite instead of failing immediately.
 const BUSY_TIMEOUT_MS = 5000;
+
+// The worst legitimate hold spans acquire, operate, and release, each of
+// which may wait on SQLite up to BUSY_TIMEOUT_MS: 3 × 5s = 15s. 60s sits
+// well above that; only a crash whose pid is later reused ages a row out.
+const LOCK_LEASE_MS = 60_000;
 
 function serializeValue(value: unknown): string {
   if (value === undefined) {
@@ -149,10 +156,11 @@ function isProcessAlive(pid: number): boolean {
 // tops and, on its first hit, writes the value under the current key
 // (materialization) before returning it. Explicit writes and drops hold a
 // session-level lock (a write_lock row keyed by session) so a concurrent
-// same-session writer is refused, while cross-session contention waits on
-// SQLite. Read-path writes (materialization, landing a keyless value) are
-// lock-free so reads can proceed. The tree view needed by the ascent arrives
-// as an argument; this module reads no context and no Pi.
+// same-session writer is refused; a crash-left row is taken over once it
+// ages past the lease. Cross-session contention waits on SQLite. Read-path
+// writes (materialization, landing a keyless value) are lock-free so reads
+// can proceed. The tree view needed by the ascent arrives as an argument;
+// this module reads no context and no Pi.
 export class SessionStore {
   readonly #path: string;
   #state: OpenState | undefined;
@@ -289,23 +297,31 @@ export class SessionStore {
 
   #acquire(sessionId: string, action: "write" | "drop"): void {
     const holder = holderOf();
+    const now = Date.now();
     const { lockInsert, lockSelect, lockUpdate } = this.#ready();
-    if (lockInsert.run(sessionId, holder).changes === 1) return;
+    if (lockInsert.run(sessionId, holder, now).changes === 1) return;
 
-    const existing = lockSelect.get(sessionId) as { holder: string } | undefined;
+    const existing = lockSelect.get(sessionId) as
+      | { holder: string; acquired_at: number }
+      | undefined;
     if (existing === undefined) {
       // Released between the insert and this read; one retry.
-      if (lockInsert.run(sessionId, holder).changes === 1) return;
+      if (lockInsert.run(sessionId, holder, now).changes === 1) return;
       throw new SessionWriteRefusedError(action, sessionId, "unknown");
     }
 
     const holderPid = parseHolderPid(existing.holder);
+    const aged = now - existing.acquired_at > LOCK_LEASE_MS;
     const mayTakeOver =
-      holderPid !== null &&
-      (holderPid === process.pid || !isProcessAlive(holderPid));
-    if (mayTakeOver && lockUpdate.run(holder, sessionId, existing.holder).changes === 1) {
-      return;
-    }
+      holderPid === process.pid ||
+      (holderPid !== null && !isProcessAlive(holderPid)) ||
+      aged;
+    const took =
+      mayTakeOver &&
+      lockUpdate.run(holder, now, sessionId, existing.holder, existing.acquired_at)
+        .changes === 1;
+    if (took) return;
+
     const current =
       (lockSelect.get(sessionId) as { holder: string } | undefined) ?? existing;
     throw new SessionWriteRefusedError(action, sessionId, current.holder);
@@ -331,6 +347,14 @@ export class SessionStore {
       database.exec("PRAGMA journal_mode = WAL");
       database.exec(CREATE_STATE_TABLE);
       database.exec(CREATE_LOCK_TABLE);
+      const lockColumns = database
+        .prepare("PRAGMA table_info(write_lock)")
+        .all() as Array<{ name: string }>;
+      if (!lockColumns.some((column) => column.name === "acquired_at")) {
+        database.exec(
+          "ALTER TABLE write_lock ADD COLUMN acquired_at INTEGER NOT NULL DEFAULT 0",
+        );
+      }
       return {
         database,
         select: database.prepare(SELECT_ROW),
