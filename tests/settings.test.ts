@@ -23,7 +23,10 @@ describe("configured storage location", () => {
     expect(resolve('{"sessionState":{"databasePath":42}}')).toEqual({ kind: "invalid" });
     expect(resolve('{"sessionState":{"databasePath":""}}')).toEqual({ kind: "invalid" });
     expect(resolve('{"sessionState":{"databasePath":null}}')).toEqual({ kind: "invalid" });
-    expect(resolve("not json")).toEqual({ kind: "invalid" });
+  });
+
+  it("treats an unparsable settings file as malformed", () => {
+    expect(resolve("not json")).toEqual({ kind: "malformed" });
   });
 
   it("keeps an absolute value as it stands", () => {

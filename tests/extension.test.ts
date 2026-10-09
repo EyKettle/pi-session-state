@@ -301,4 +301,16 @@ describe("extension entry", () => {
     await events.get("session_start")?.({}, contextFor("s1", false, messages));
     expect(messages).toHaveLength(0);
   });
+
+  it("reports a settings file that is not valid JSON at session_start", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(join(dir, "settings.json"), "not json");
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("not valid JSON");
+  });
 });

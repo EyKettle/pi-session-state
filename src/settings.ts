@@ -3,6 +3,7 @@ import { isAbsolute, join } from "node:path";
 
 export type ConfiguredLocation =
   | { kind: "unset" }
+  | { kind: "malformed" }
   | { kind: "invalid" }
   | { kind: "absolute"; path: string };
 
@@ -25,7 +26,7 @@ export function resolveConfiguredLocation(
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { kind: "invalid" };
+    return { kind: "malformed" };
   }
   if (typeof parsed !== "object" || parsed === null) return { kind: "unset" };
   const sessionState = (parsed as Record<string, unknown>).sessionState;
@@ -59,7 +60,7 @@ export function readSettingsText(agentDir: string): string | undefined {
 
 export interface AgentDatabasePath {
   path: string;
-  configured: "used" | "unset" | "invalid";
+  configured: "used" | "unset" | "malformed" | "invalid";
 }
 
 // Reads the agent settings file and resolves the location, falling back to

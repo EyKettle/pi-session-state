@@ -37,11 +37,18 @@ export default function extension(pi: ExtensionAPI): void {
 
   pi.on("session_start", (_event: unknown, ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;
-    if (location.configured !== "invalid") return;
-    ctx.ui.notify(
-      `session-state: the sessionState.databasePath setting is not a non-empty string; using the default location ${location.path}`,
-      "warning",
-    );
+    const fallback = `using the default location ${location.path}`;
+    if (location.configured === "malformed") {
+      ctx.ui.notify(
+        `session-state: the settings file is not valid JSON; ${fallback}`,
+        "warning",
+      );
+    } else if (location.configured === "invalid") {
+      ctx.ui.notify(
+        `session-state: the sessionState.databasePath setting is not a non-empty string; ${fallback}`,
+        "warning",
+      );
+    }
   });
 
   pi.registerCommand("state:status", {
