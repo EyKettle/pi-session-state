@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { branchKeyFromLeaf, type SessionTreeView } from "./branch.ts";
 import { getAgentDir, type ExtensionContext } from "../deps/pi-coding-agent.ts";
-import { openStore } from "./store.ts";
+import { openStore, SessionWriteRefusedError, type StateKey } from "./store.ts";
 
 export type SessionStateScope = "session" | "branch";
 
@@ -66,9 +66,17 @@ function sessionView(manager: ExtensionContext["sessionManager"]): SessionTreeVi
   };
 }
 
-function branchKeyOf(ctx: ExtensionContext): string | null {
+// One expression of how a context yields a branch key and its tree.
+function branchKeyContext(ctx: ExtensionContext): {
+  branchId: string | null;
+  tree: SessionTreeView;
+} {
   const manager = ctx.sessionManager;
-  return branchKeyFromLeaf(sessionView(manager), manager.getLeafId());
+  const tree = sessionView(manager);
+  return {
+    branchId: branchKeyFromLeaf(tree, manager.getLeafId()),
+    tree,
+  };
 }
 
 export function openSessionState<T>(
@@ -79,48 +87,65 @@ export function openSessionState<T>(
     databasePath ?? join(getAgentDir(), "sessions", "states.sqlite"),
   );
 
+  // The scope's key derivation is fixed at construction.
+  const resolveContext: (
+    ctx: ExtensionContext,
+  ) => { key: StateKey; tree: SessionTreeView | null } =
+    scope === "session"
+      ? (ctx) => ({
+          key: {
+            pluginId,
+            sessionId: ctx.sessionManager.getSessionId(),
+            branchId: "",
+          },
+          tree: null,
+        })
+      : (ctx) => {
+          const { branchId, tree } = branchKeyContext(ctx);
+          return {
+            key: {
+              pluginId,
+              sessionId: ctx.sessionManager.getSessionId(),
+              branchId,
+            },
+            tree,
+          };
+        };
+
+  const notifyRefusal = (ctx: ExtensionContext, error: unknown): void => {
+    if (error instanceof SessionWriteRefusedError && ctx.hasUI) {
+      ctx.ui.notify(error.message, "error");
+    }
+  };
+
   return {
     read(ctx: ExtensionContext): T | undefined {
-      const manager = ctx.sessionManager;
-      const sessionId = manager.getSessionId();
-      if (scope === "session") {
-        return store.read(pluginId, sessionId, "", null) as T | undefined;
-      }
-      const view = sessionView(manager);
-      const key = branchKeyFromLeaf(view, manager.getLeafId());
-      if (key === null) return undefined;
-      return store.read(pluginId, sessionId, key, view) as T | undefined;
+      const { key, tree } = resolveContext(ctx);
+      return store.read(key, tree) as T | undefined;
     },
 
     write(ctx: ExtensionContext, value: T): void {
-      const sessionId = ctx.sessionManager.getSessionId();
-      if (scope === "session") {
-        store.write(pluginId, sessionId, "", value);
-        return;
+      const { key } = resolveContext(ctx);
+      try {
+        store.write(key, value);
+      } catch (error) {
+        notifyRefusal(ctx, error);
+        throw error;
       }
-      const key = branchKeyOf(ctx);
-      if (key === null) {
-        // A keyless branch write would land on the session row; fail instead.
-        throw new Error(
-          "session-state: the context has no branch key; nothing to write to",
-        );
-      }
-      store.write(pluginId, sessionId, key, value);
     },
 
     drop(ctx: ExtensionContext): void {
-      const sessionId = ctx.sessionManager.getSessionId();
-      if (scope === "session") {
-        store.drop(pluginId, sessionId, "");
-        return;
+      const { key } = resolveContext(ctx);
+      try {
+        store.drop(key);
+      } catch (error) {
+        notifyRefusal(ctx, error);
+        throw error;
       }
-      const key = branchKeyOf(ctx);
-      if (key === null) return;
-      store.drop(pluginId, sessionId, key);
     },
   };
 }
 
 export function branchKey(ctx: ExtensionContext): string | null {
-  return branchKeyOf(ctx);
+  return branchKeyContext(ctx).branchId;
 }

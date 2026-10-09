@@ -11,7 +11,21 @@ export type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-type ValueEntry = { kind: "value"; value: JsonValue };
+// "" targets the session scope; null targets the branch scope before the
+// session tree has produced a key — such a value waits in memory only.
+export interface StateKey {
+  pluginId: string;
+  sessionId: string;
+  branchId: string | null;
+}
+
+type KeyedStateKey = {
+  pluginId: string;
+  sessionId: string;
+  branchId: string;
+};
+
+type ValueEntry = { kind: "value"; json: string };
 type CacheEntry = ValueEntry | { kind: "absent" };
 
 type OpenState = {
@@ -19,14 +33,42 @@ type OpenState = {
   select: StatementSync;
   upsert: StatementSync;
   remove: StatementSync;
+  lockInsert: StatementSync;
+  lockSelect: StatementSync;
+  lockUpdate: StatementSync;
+  lockDelete: StatementSync;
 };
 
-const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS state (
+// The refusal carries its four elements in the message and as fields:
+// initiator (the holder of the session lock), action, object (the session),
+// and reason.
+export class SessionWriteRefusedError extends Error {
+  readonly action: "write" | "drop";
+  readonly sessionId: string;
+  readonly holder: string;
+
+  constructor(action: "write" | "drop", sessionId: string, holder: string) {
+    super(
+      `session-state: ${action} refused — initiator: ${holder}; action: ${action}; object: session ${sessionId}; reason: one writer per session at a time`,
+    );
+    this.name = "SessionWriteRefusedError";
+    this.action = action;
+    this.sessionId = sessionId;
+    this.holder = holder;
+  }
+}
+
+const CREATE_STATE_TABLE = `CREATE TABLE IF NOT EXISTS state (
   plugin_id  TEXT NOT NULL,
   session_id TEXT NOT NULL,
   branch_id  TEXT NOT NULL,
   value      TEXT NOT NULL,
   PRIMARY KEY (plugin_id, session_id, branch_id)
+)`;
+
+const CREATE_LOCK_TABLE = `CREATE TABLE IF NOT EXISTS write_lock (
+  session_id TEXT PRIMARY KEY,
+  holder     TEXT NOT NULL
 )`;
 
 const SELECT_ROW =
@@ -35,6 +77,16 @@ const UPSERT_ROW =
   "INSERT OR REPLACE INTO state (plugin_id, session_id, branch_id, value) VALUES (?, ?, ?, ?)";
 const DELETE_ROW =
   "DELETE FROM state WHERE plugin_id = ? AND session_id = ? AND branch_id = ?";
+
+const LOCK_INSERT =
+  "INSERT OR IGNORE INTO write_lock (session_id, holder) VALUES (?, ?)";
+const LOCK_SELECT = "SELECT holder FROM write_lock WHERE session_id = ?";
+const LOCK_UPDATE =
+  "UPDATE write_lock SET holder = ? WHERE session_id = ? AND holder = ?";
+const LOCK_DELETE = "DELETE FROM write_lock WHERE session_id = ? AND holder = ?";
+
+// Cross-session contention waits on SQLite instead of failing immediately.
+const BUSY_TIMEOUT_MS = 5000;
 
 function serializeValue(value: unknown): string {
   if (value === undefined) {
@@ -56,114 +108,211 @@ function serializeValue(value: unknown): string {
   return json;
 }
 
-function cacheKey(pluginId: string, sessionId: string, branchId: string): string {
-  return `${pluginId}\u0000${sessionId}\u0000${branchId}`;
+function parseStored(json: string): JsonValue {
+  try {
+    return JSON.parse(json) as JsonValue;
+  } catch (error) {
+    throw new Error("session-state: corrupt JSON in the state database", {
+      cause: error,
+    });
+  }
+}
+
+function cacheKeyOf(key: KeyedStateKey): string {
+  return `${key.pluginId}\u0000${key.sessionId}\u0000${key.branchId}`;
+}
+
+function pendingKeyOf(pluginId: string, sessionId: string): string {
+  return `${pluginId}\u0000${sessionId}`;
+}
+
+function holderOf(): string {
+  return `pid:${process.pid}`;
+}
+
+function parseHolderPid(holder: string): number | null {
+  const match = /^pid:(\d+)$/.exec(holder);
+  return match === null ? null : Number(match[1]);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
 }
 
 // store.ts -> key to row: SQLite reads and writes, an in-process cache, and
 // the branch ascent. A branch read that misses the current key ascends run
 // tops and, on its first hit, writes the value under the current key
-// (materialization) before returning it. The tree view needed by the ascent
-// arrives as an argument; this module reads no context, no Pi, and no clock.
+// (materialization) before returning it. Explicit writes and drops hold a
+// session-level lock (a write_lock row keyed by session) so a concurrent
+// same-session writer is refused, while cross-session contention waits on
+// SQLite. Read-path writes (materialization, landing a keyless value) are
+// lock-free so reads can proceed. The tree view needed by the ascent arrives
+// as an argument; this module reads no context and no Pi.
 export class SessionStore {
   readonly #path: string;
   #state: OpenState | undefined;
   readonly #cache = new Map<string, CacheEntry>();
+  // Keyless branch writes, held until the context yields a key.
+  readonly #pending = new Map<string, string>();
 
   constructor(databasePath: string) {
     this.#path = databasePath;
   }
 
-  read(
-    pluginId: string,
-    sessionId: string,
-    branchId: string,
-    tree: SessionTreeView | null,
-  ): JsonValue | undefined {
-    const current = this.#load(pluginId, sessionId, branchId);
-    if (current.kind === "value") return current.value;
+  read(key: StateKey, tree: SessionTreeView | null): JsonValue | undefined {
+    if (key.branchId === null) {
+      const pending = this.#pending.get(pendingKeyOf(key.pluginId, key.sessionId));
+      return pending === undefined ? undefined : parseStored(pending);
+    }
+    const keyed: KeyedStateKey = {
+      pluginId: key.pluginId,
+      sessionId: key.sessionId,
+      branchId: key.branchId,
+    };
+    if (keyed.branchId !== "") this.#flushPending(keyed);
+
+    const current = this.#load(keyed);
+    if (current.kind === "value") return parseStored(current.json);
     if (tree === null) return undefined;
-    const inherited = this.#ascend(pluginId, sessionId, branchId, tree);
+
+    const inherited = this.#ascend(keyed, tree);
     if (inherited === undefined) return undefined;
-    this.#storeValue(pluginId, sessionId, branchId, inherited.value);
-    return inherited.value;
+    this.#writeRow(keyed, inherited.json);
+    return parseStored(inherited.json);
   }
 
-  write(
-    pluginId: string,
-    sessionId: string,
-    branchId: string,
-    value: unknown,
-  ): void {
-    this.#storeValue(pluginId, sessionId, branchId, value);
+  write(key: StateKey, value: unknown): void {
+    const json = serializeValue(value);
+    if (key.branchId === null) {
+      this.#pending.set(pendingKeyOf(key.pluginId, key.sessionId), json);
+      return;
+    }
+    const keyed: KeyedStateKey = {
+      pluginId: key.pluginId,
+      sessionId: key.sessionId,
+      branchId: key.branchId,
+    };
+    this.#withLock(keyed.sessionId, "write", () => {
+      this.#writeRow(keyed, json);
+    });
+    if (keyed.branchId !== "") {
+      this.#pending.delete(pendingKeyOf(keyed.pluginId, keyed.sessionId));
+    }
   }
 
-  drop(pluginId: string, sessionId: string, branchId: string): void {
-    const { remove } = this.#ready();
-    remove.run(pluginId, sessionId, branchId);
-    this.#cache.delete(cacheKey(pluginId, sessionId, branchId));
+  drop(key: StateKey): void {
+    if (key.branchId === null) {
+      this.#pending.delete(pendingKeyOf(key.pluginId, key.sessionId));
+      return;
+    }
+    const keyed: KeyedStateKey = {
+      pluginId: key.pluginId,
+      sessionId: key.sessionId,
+      branchId: key.branchId,
+    };
+    this.#withLock(keyed.sessionId, "drop", () => {
+      const { remove } = this.#ready();
+      remove.run(keyed.pluginId, keyed.sessionId, keyed.branchId);
+      this.#cache.delete(cacheKeyOf(keyed));
+    });
+    if (keyed.branchId !== "") {
+      this.#pending.delete(pendingKeyOf(keyed.pluginId, keyed.sessionId));
+    }
+  }
+
+  // A keyless value lands under the first key the context yields.
+  #flushPending(key: KeyedStateKey): void {
+    const pending = this.#pending.get(pendingKeyOf(key.pluginId, key.sessionId));
+    if (pending === undefined) return;
+    this.#writeRow(key, pending);
+    this.#pending.delete(pendingKeyOf(key.pluginId, key.sessionId));
   }
 
   // The scope's first load queries the disk; afterwards the cache answers.
-  #load(pluginId: string, sessionId: string, branchId: string): CacheEntry {
-    const key = cacheKey(pluginId, sessionId, branchId);
-    const cached = this.#cache.get(key);
+  #load(key: KeyedStateKey): CacheEntry {
+    const cacheKey = cacheKeyOf(key);
+    const cached = this.#cache.get(cacheKey);
     if (cached !== undefined) return cached;
 
     const { select } = this.#ready();
-    const row = select.get(pluginId, sessionId, branchId) as
+    const row = select.get(key.pluginId, key.sessionId, key.branchId) as
       | { value: string }
       | undefined;
-    let entry: CacheEntry;
-    if (row === undefined) {
-      entry = { kind: "absent" };
-    } else {
-      let parsed: JsonValue;
-      try {
-        parsed = JSON.parse(row.value) as JsonValue;
-      } catch (error) {
-        throw new Error(
-          `session-state: corrupt JSON stored for plugin ${pluginId} in session ${sessionId}`,
-          { cause: error },
-        );
-      }
-      entry = { kind: "value", value: parsed };
-    }
-    this.#cache.set(key, entry);
+    const entry: CacheEntry =
+      row === undefined
+        ? { kind: "absent" }
+        : { kind: "value", json: row.value };
+    this.#cache.set(cacheKey, entry);
     return entry;
   }
 
-  #ascend(
-    pluginId: string,
-    sessionId: string,
-    startKey: string,
-    tree: SessionTreeView,
-  ): ValueEntry | undefined {
-    let node = startKey;
+  #ascend(key: KeyedStateKey, tree: SessionTreeView): ValueEntry | undefined {
+    let node = key.branchId;
     for (;;) {
       const parent = tree.parentOf(node);
       if (parent === null) return undefined;
       const parentKey = branchKeyFromLeaf(tree, parent);
       if (parentKey === null) return undefined;
-      const entry = this.#load(pluginId, sessionId, parentKey);
+      const entry = this.#load({
+        pluginId: key.pluginId,
+        sessionId: key.sessionId,
+        branchId: parentKey,
+      });
       if (entry.kind === "value") return entry;
       node = parentKey;
     }
   }
 
-  #storeValue(
-    pluginId: string,
-    sessionId: string,
-    branchId: string,
-    value: unknown,
-  ): void {
-    const json = serializeValue(value);
+  #writeRow(key: KeyedStateKey, json: string): void {
     const { upsert } = this.#ready();
-    upsert.run(pluginId, sessionId, branchId, json);
-    this.#cache.set(cacheKey(pluginId, sessionId, branchId), {
-      kind: "value",
-      value: value as JsonValue,
-    });
+    upsert.run(key.pluginId, key.sessionId, key.branchId, json);
+    this.#cache.set(cacheKeyOf(key), { kind: "value", json });
+  }
+
+  #withLock<T>(
+    sessionId: string,
+    action: "write" | "drop",
+    operation: () => T,
+  ): T {
+    this.#acquire(sessionId, action);
+    try {
+      return operation();
+    } finally {
+      this.#release(sessionId);
+    }
+  }
+
+  #acquire(sessionId: string, action: "write" | "drop"): void {
+    const holder = holderOf();
+    const { lockInsert, lockSelect, lockUpdate } = this.#ready();
+    if (lockInsert.run(sessionId, holder).changes === 1) return;
+
+    const existing = lockSelect.get(sessionId) as { holder: string } | undefined;
+    if (existing === undefined) {
+      // Released between the insert and this read; one retry.
+      if (lockInsert.run(sessionId, holder).changes === 1) return;
+      throw new SessionWriteRefusedError(action, sessionId, "unknown");
+    }
+
+    const holderPid = parseHolderPid(existing.holder);
+    const mayTakeOver =
+      holderPid !== null &&
+      (holderPid === process.pid || !isProcessAlive(holderPid));
+    if (mayTakeOver && lockUpdate.run(holder, sessionId, existing.holder).changes === 1) {
+      return;
+    }
+    const current =
+      (lockSelect.get(sessionId) as { holder: string } | undefined) ?? existing;
+    throw new SessionWriteRefusedError(action, sessionId, current.holder);
+  }
+
+  #release(sessionId: string): void {
+    this.#ready().lockDelete.run(sessionId, holderOf());
   }
 
   #ready(): OpenState {
@@ -178,13 +327,19 @@ export class SessionStore {
     try {
       mkdirSync(dirname(this.#path), { recursive: true });
       const database = new DatabaseSync(this.#path);
+      database.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
       database.exec("PRAGMA journal_mode = WAL");
-      database.exec(CREATE_TABLE);
+      database.exec(CREATE_STATE_TABLE);
+      database.exec(CREATE_LOCK_TABLE);
       return {
         database,
         select: database.prepare(SELECT_ROW),
         upsert: database.prepare(UPSERT_ROW),
         remove: database.prepare(DELETE_ROW),
+        lockInsert: database.prepare(LOCK_INSERT),
+        lockSelect: database.prepare(LOCK_SELECT),
+        lockUpdate: database.prepare(LOCK_UPDATE),
+        lockDelete: database.prepare(LOCK_DELETE),
       };
     } catch (error) {
       throw new Error(
