@@ -1,6 +1,6 @@
 {
   "name": "pi-session-state",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Session-scoped, optionally branch-scoped JSON state over one SQLite file, for Pi extensions",
   "keywords": [
     "pi-package",
@@ -30,7 +30,9 @@
     "./package.json": "./package.json"
   },
   "pi": {
-    "extensions": ["./src/extension.ts"]
+    "extensions": [
+      "./src/extension.ts"
+    ]
   },
   "files": [
     "src",
