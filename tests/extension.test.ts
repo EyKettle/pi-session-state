@@ -11,6 +11,8 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import extension from "../src/extension.ts";
 import { openStore } from "../src/store.ts";
+import { openSessionState } from "../src/index.ts";
+import { publishLocation } from "../src/authority.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -27,6 +29,7 @@ function scratch(): string {
 
 afterEach(() => {
   for (const restore of envRestores.splice(0)) restore();
+  publishLocation(undefined);
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -477,5 +480,46 @@ describe("extension entry", () => {
       .get("state:status")
       ?.handler("", contextFor("s1", true, status, true, [], { cwd, trusted: false }));
     expect(status[0]).toContain(`database: ${agentPath}`);
+  });
+
+  it("a consumer shares the entry's database for the session", async () => {
+    const cwd = scratch();
+    const agent = scratch();
+    withAgentDir(agent);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    const projectPath = join(cwd, "project.sqlite");
+    writeFileSync(
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: projectPath } }),
+    );
+    writeFileSync(
+      join(agent, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: join(agent, "agent.sqlite") } }),
+    );
+
+    const loaded = loadExtension();
+    // The consumer constructs before session start.
+    const consumer = openSessionState<{ v: number }>({ pluginId: "role" });
+    const ctx = contextFor("s1", true, [], true, [], { cwd, trusted: true });
+    await startSession(loaded, ctx);
+    consumer.write(ctx, { v: 1 });
+
+    const status: string[] = [];
+    await loaded.commands
+      .get("state:status")
+      ?.handler("", contextFor("s1", true, status, true, [], { cwd, trusted: true }));
+    expect(status[0]).toContain(`database: ${projectPath}`);
+
+    const db = new DatabaseSync(projectPath);
+    try {
+      expect(
+        (db
+          .prepare("SELECT COUNT(*) AS n FROM state WHERE plugin_id = ? AND session_id = ?")
+          .get("role", "s1") as { n: number }).n,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+    expect(existsSync(join(agent, "agent.sqlite"))).toBe(false);
   });
 });

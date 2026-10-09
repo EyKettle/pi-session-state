@@ -2,8 +2,14 @@ import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 import { branchKeyFromLeaf, type SessionTreeView } from "./branch.ts";
 import { getAgentDir, type ExtensionContext } from "../deps/pi-coding-agent.ts";
+import { authoritativeLocation } from "./authority.ts";
 import { resolveDatabaseLocation } from "./settings.ts";
-import { openStore, SessionWriteRefusedError, type StateKey } from "./store.ts";
+import {
+  openStore,
+  SessionWriteRefusedError,
+  type SessionStore,
+  type StateKey,
+} from "./store.ts";
 
 export type SessionStateScope = "session" | "branch";
 
@@ -50,13 +56,6 @@ function validateOptions(options: SessionStateOptions): {
   return { pluginId, scope, databasePath };
 }
 
-// The three sources, first hit wins: the integration parameter, the
-// agent-level settings file, the default location.
-function resolveDatabasePath(databasePath: string | undefined): string {
-  if (databasePath !== undefined) return databasePath;
-  return resolveDatabaseLocation({ agentDir: getAgentDir(), homeDir: homedir() }).path;
-}
-
 // The session tree arrives as a structural view, rebuilt on every call so
 // nothing is held across contexts.
 function sessionView(manager: ExtensionContext["sessionManager"]): SessionTreeView {
@@ -94,7 +93,27 @@ export function openSessionState<T>(
   options: SessionStateOptions,
 ): SessionState<T> {
   const { pluginId, scope, databasePath } = validateOptions(options);
-  const store = openStore(resolveDatabasePath(databasePath));
+
+  // The integration parameter, then the location the entry published for
+  // this process (which follows the four sources), then this library's own
+  // fail-closed resolution: the agent-level settings file, then the default.
+  // The fail-closed path is read once, at construction; a location the entry
+  // publishes later outranks it at every call.
+  let resolveStore: () => SessionStore;
+  if (databasePath !== undefined) {
+    resolveStore = () => openStore(databasePath);
+  } else {
+    const failClosedPath = resolveDatabaseLocation({
+      agentDir: getAgentDir(),
+      homeDir: homedir(),
+    }).path;
+    resolveStore = () => {
+      const authoritative = authoritativeLocation();
+      return openStore(
+        authoritative === undefined ? failClosedPath : authoritative.path,
+      );
+    };
+  }
 
   // The scope's key derivation is fixed at construction.
   const resolveContext: (
@@ -130,13 +149,13 @@ export function openSessionState<T>(
   return {
     read(ctx: ExtensionContext): T | undefined {
       const { key, tree } = resolveContext(ctx);
-      return store.read(key, tree) as T | undefined;
+      return resolveStore().read(key, tree) as T | undefined;
     },
 
     write(ctx: ExtensionContext, value: T): void {
       const { key } = resolveContext(ctx);
       try {
-        store.write(key, value);
+        resolveStore().write(key, value);
       } catch (error) {
         notifyRefusal(ctx, error);
         throw error;
@@ -146,7 +165,7 @@ export function openSessionState<T>(
     drop(ctx: ExtensionContext): void {
       const { key } = resolveContext(ctx);
       try {
-        store.drop(key);
+        resolveStore().drop(key);
       } catch (error) {
         notifyRefusal(ctx, error);
         throw error;

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as api from "../src/index.ts";
 import { branchKey, openSessionState } from "../src/index.ts";
 import { SessionWriteRefusedError } from "../src/store.ts";
+import { publishLocation } from "../src/authority.ts";
 import type { ExtensionContext } from "../deps/pi-coding-agent.ts";
 
 type Node = { id: string; parentId: string | null };
@@ -21,6 +22,7 @@ function scratch(): { dir: string; path: string } {
 
 afterEach(() => {
   for (const restore of envRestores.splice(0)) restore();
+  publishLocation(undefined);
   for (const dir of scratchDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -366,4 +368,74 @@ describe("storage location sources", () => {
     const moved = openSessionState<{ v: number }>({ pluginId: "role" });
     expect(moved.read(ctx)).toBeUndefined();
   });
+
+describe("location authority", () => {
+  it("the published location decides the library's store", () => {
+    const { dir } = scratch();
+    withAgentDir(dir);
+    const authoritative = scratch().dir;
+    const authoritativePath = join(authoritative, "authoritative.sqlite");
+    publishLocation({
+      path: authoritativePath,
+      configured: "used",
+      source: join(authoritative, "settings.json"),
+    });
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(authoritativePath)).toBe(true);
+    expect(existsSync(join(dir, "sessions", "states.sqlite"))).toBe(false);
+  });
+
+  it("a published agent location (an untrusted project) points the library at the agent file", () => {
+    const { dir } = scratch();
+    withAgentDir(dir);
+    const agentPath = join(dir, "agent.sqlite");
+    publishLocation({
+      path: agentPath,
+      configured: "used",
+      source: join(dir, "settings.json"),
+    });
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(agentPath)).toBe(true);
+    expect(existsSync(join(dir, "sessions", "states.sqlite"))).toBe(false);
+  });
+
+  it("the integration parameter outranks the published location", () => {
+    const { path } = scratch();
+    const authoritative = scratch().dir;
+    publishLocation({
+      path: join(authoritative, "authoritative.sqlite"),
+      configured: "used",
+    });
+
+    const state = openSessionState<{ v: number }>({
+      pluginId: "role",
+      databasePath: path,
+    });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(join(authoritative, "authoritative.sqlite"))).toBe(false);
+  });
+
+  it("without a published location the library keeps its fail-closed resolution", () => {
+    const { dir } = scratch();
+    withAgentDir(dir);
+    const agentPath = join(dir, "agent.sqlite");
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: agentPath } }),
+    );
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(agentPath)).toBe(true);
+  });
+});
 });

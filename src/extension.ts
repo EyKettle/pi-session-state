@@ -8,6 +8,7 @@ import type {
 } from "../deps/pi-coding-agent.ts";
 import { resolveDatabaseLocation } from "./settings.ts";
 import { holderStatus, openStore, type SessionStore } from "./store.ts";
+import { publishLocation } from "./authority.ts";
 
 function holderState(holder: string): string {
   const status = holderStatus(holder);
@@ -46,6 +47,7 @@ export default function extension(pi: ExtensionAPI): void {
       projectDir: join(ctx.cwd, CONFIG_DIR_NAME),
       projectTrusted: ctx.isProjectTrusted(),
     });
+    publishLocation(location);
     current = { path: location.path, store: openStore(location.path) };
 
     if (!ctx.hasUI) return;
