@@ -56,3 +56,28 @@ export function readSettingsText(agentDir: string): string | undefined {
     return undefined;
   }
 }
+
+export interface AgentDatabasePath {
+  path: string;
+  configured: "used" | "unset" | "invalid";
+}
+
+// Reads the agent settings file and resolves the location, falling back to
+// the default under the agent directory.
+export function resolveAgentDatabasePath(
+  agentDir: string,
+  homeDir: string,
+): AgentDatabasePath {
+  const configured = resolveConfiguredLocation({
+    text: readSettingsText(agentDir),
+    agentDir,
+    homeDir,
+  });
+  if (configured.kind === "absolute") {
+    return { path: configured.path, configured: "used" };
+  }
+  return {
+    path: join(agentDir, "sessions", "states.sqlite"),
+    configured: configured.kind,
+  };
+}

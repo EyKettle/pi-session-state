@@ -1,8 +1,8 @@
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { branchKeyFromLeaf, type SessionTreeView } from "./branch.ts";
 import { getAgentDir, type ExtensionContext } from "../deps/pi-coding-agent.ts";
-import { readSettingsText, resolveConfiguredLocation } from "./settings.ts";
+import { resolveAgentDatabasePath } from "./settings.ts";
 import { openStore, SessionWriteRefusedError, type StateKey } from "./store.ts";
 
 export type SessionStateScope = "session" | "branch";
@@ -54,14 +54,7 @@ function validateOptions(options: SessionStateOptions): {
 // agent-level settings file, the default location.
 function resolveDatabasePath(databasePath: string | undefined): string {
   if (databasePath !== undefined) return databasePath;
-  const agentDir = getAgentDir();
-  const configured = resolveConfiguredLocation({
-    text: readSettingsText(agentDir),
-    agentDir,
-    homeDir: homedir(),
-  });
-  if (configured.kind === "absolute") return configured.path;
-  return join(agentDir, "sessions", "states.sqlite");
+  return resolveAgentDatabasePath(getAgentDir(), homedir()).path;
 }
 
 // The session tree arrives as a structural view, rebuilt on every call so

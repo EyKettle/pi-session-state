@@ -162,6 +162,12 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+// Whether the holder recorded in a lock row names a live process.
+export function holderIsAlive(holder: string): boolean {
+  const pid = parseHolderPid(holder);
+  return pid === null ? false : isProcessAlive(pid);
+}
+
 // store.ts -> key to row: SQLite reads and writes, an in-process cache, and
 // the branch ascent. A branch read that misses the current key ascends run
 // tops and, on its first hit, writes the value under the current key
