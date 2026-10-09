@@ -74,16 +74,18 @@ interface SessionState<T> {
 
 ## 存储
 
-默认 `{agent_dir}/sessions/states.sqlite`。位置有三个来源，先命中者生效：
+默认 `{agent_dir}/sessions/states.sqlite`。位置有四个来源，先命中者生效：
 
 | 顺序 | 来源 | 谁定 |
 | --- | --- | --- |
 | 1 | `openSessionState` 的 `databasePath` 参数 | 接入方 |
-| 2 | `{agent_dir}/settings.json` 的 `sessionState.databasePath` | 使用者 |
-| 3 | 默认位置 | — |
+| 2 | `{cwd}/.pi/settings.json` 的 `sessionState.databasePath` | 使用者，项目级 |
+| 3 | `{agent_dir}/settings.json` 的 `sessionState.databasePath` | 使用者 |
+| 4 | 默认位置 | — |
 
-项目级 `settings.json` 不参与——那里的取值由仓库给出，
-不该决定使用者的状态写在哪。配置在构造期读入，改动在下次载入生效。
+项目级只在项目已受信任时读；未受信任时该项为空，与 Pi 对项目配置的处理一致。
+
+配置在构造期读入，改动在下次载入生效。
 
 接入参数取非空的绝对路径；不是即抛错。
 
@@ -93,7 +95,7 @@ interface SessionState<T> {
 | --- | --- |
 | 绝对路径 | 原样 |
 | `~` 或 `~/` 开头 | 使用者的家目录 |
-| 相对路径 | `{agent_dir}` 之下 |
+| 相对路径 | 用户级配置相对 `{agent_dir}`，项目级配置相对项目 `.pi` |
 
 没有配置时静默；配置了却取不到可用值时，
 退回默认位置并在会话开始时经 Pi 的 UI 报告一次。

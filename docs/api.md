@@ -79,18 +79,21 @@ message ends.
 
 ## Storage
 
-The default is `{agent_dir}/sessions/states.sqlite`. Three sources decide the
+The default is `{agent_dir}/sessions/states.sqlite`. Four sources decide the
 location, first hit wins:
 
 | Order | Source | Set by |
 | --- | --- | --- |
 | 1 | `openSessionState`'s `databasePath` parameter | the integrator |
-| 2 | `sessionState.databasePath` in `{agent_dir}/settings.json` | the user |
-| 3 | the default location | — |
+| 2 | `sessionState.databasePath` in `{cwd}/.pi/settings.json` | the user, project level |
+| 3 | `sessionState.databasePath` in `{agent_dir}/settings.json` | the user |
+| 4 | the default location | — |
 
-Project-level `settings.json` takes no part — the values there come from the
-repository, which should not decide where the user's state is written. The
-location is read at construction, and a change takes effect on the next load.
+The project level is read only when the project is trusted; untrusted, it
+counts as absent, which is how Pi itself treats project configuration.
+
+The location is read at construction, and a change takes effect on the next
+load.
 
 The integration parameter takes a non-empty absolute path; anything else throws.
 
@@ -100,7 +103,7 @@ The setting takes three forms, each normalized to an absolute path:
 | --- | --- |
 | an absolute path | itself |
 | starting with `~` or `~/` | the user's home directory |
-| a relative path | under `{agent_dir}` |
+| a relative path | under `{agent_dir}` at the user level, under the project's `.pi` at the project level |
 
 An absent configuration is silent. A configured value that yields no usable
 location falls back to the default, and the session start reports it once
