@@ -47,6 +47,12 @@ describe("configured storage location", () => {
     });
   });
 
+  it("treats a ~user value as unsupported", () => {
+    expect(resolve('{"sessionState":{"databasePath":"~other/db.sqlite"}}')).toEqual({
+      kind: "unsupported",
+    });
+  });
+
   it("resolves a relative value under the agent directory", () => {
     expect(resolve('{"sessionState":{"databasePath":"state/db.sqlite"}}')).toEqual({
       kind: "absolute",

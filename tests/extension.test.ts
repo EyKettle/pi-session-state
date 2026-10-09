@@ -313,4 +313,19 @@ describe("extension entry", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain("not valid JSON");
   });
+
+  it("reports a ~user configured location at session_start", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: "~other/db.sqlite" } }),
+    );
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("~user");
+  });
 });

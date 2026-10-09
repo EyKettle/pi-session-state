@@ -5,6 +5,7 @@ export type ConfiguredLocation =
   | { kind: "unset" }
   | { kind: "malformed" }
   | { kind: "invalid" }
+  | { kind: "unsupported" }
   | { kind: "absolute"; path: string };
 
 export interface LocationSources {
@@ -38,12 +39,11 @@ export function resolveConfiguredLocation(
   if (typeof value !== "string" || value.length === 0) return { kind: "invalid" };
 
   if (value.startsWith("~")) {
-    const rest = value.slice(1);
-    if (rest === "") return { kind: "absolute", path: homeDir };
-    return {
-      kind: "absolute",
-      path: join(homeDir, rest.startsWith("/") ? rest.slice(1) : rest),
-    };
+    if (value === "~") return { kind: "absolute", path: homeDir };
+    if (value.startsWith("~/")) {
+      return { kind: "absolute", path: join(homeDir, value.slice(2)) };
+    }
+    return { kind: "unsupported" };
   }
   if (isAbsolute(value)) return { kind: "absolute", path: value };
   return { kind: "absolute", path: join(agentDir, value) };
@@ -60,7 +60,7 @@ export function readSettingsText(agentDir: string): string | undefined {
 
 export interface AgentDatabasePath {
   path: string;
-  configured: "used" | "unset" | "malformed" | "invalid";
+  configured: "used" | "unset" | "malformed" | "invalid" | "unsupported";
 }
 
 // Reads the agent settings file and resolves the location, falling back to

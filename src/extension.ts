@@ -48,6 +48,11 @@ export default function extension(pi: ExtensionAPI): void {
         `session-state: the sessionState.databasePath setting is not a non-empty string; ${fallback}`,
         "warning",
       );
+    } else if (location.configured === "unsupported") {
+      ctx.ui.notify(
+        `session-state: the sessionState.databasePath setting uses a "~user" form the contract cannot express; ${fallback}`,
+        "warning",
+      );
     }
   });
 
