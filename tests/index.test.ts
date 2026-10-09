@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -74,6 +74,9 @@ describe("public surface", () => {
     expect(() => openSessionState({ pluginId: "ok", databasePath: "" })).toThrow();
     expect(() =>
       openSessionState({ pluginId: "ok", databasePath: 42 as never }),
+    ).toThrow();
+    expect(() =>
+      openSessionState({ pluginId: "ok", databasePath: "relative/db.sqlite" }),
     ).toThrow();
     expect(() =>
       openSessionState({ pluginId: "role", databasePath: path }),
@@ -250,5 +253,117 @@ describe("public surface", () => {
     state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
 
     expect(existsSync(join(dir, "sessions", "states.sqlite"))).toBe(true);
+  });
+});
+
+describe("storage location sources", () => {
+  function withAgentDir(dir: string): void {
+    const previous = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = dir;
+    envRestores.push(() => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+    });
+  }
+
+  it("the parameter outranks a configured location", () => {
+    const { dir, path } = scratch();
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: join(dir, "configured.sqlite") } }),
+    );
+    withAgentDir(dir);
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role", databasePath: path });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(path)).toBe(true);
+    expect(existsSync(join(dir, "configured.sqlite"))).toBe(false);
+  });
+
+  it("uses the configured location when no parameter is given", () => {
+    const { dir } = scratch();
+    const configured = join(dir, "custom", "db.sqlite");
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: configured } }),
+    );
+    withAgentDir(dir);
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(configured)).toBe(true);
+    expect(existsSync(join(dir, "sessions", "states.sqlite"))).toBe(false);
+  });
+
+  it("resolves a relative configured value under the agent directory", () => {
+    const { dir } = scratch();
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: "state/db.sqlite" } }),
+    );
+    withAgentDir(dir);
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(join(dir, "state", "db.sqlite"))).toBe(true);
+  });
+
+  it("falls back to the default when the configured value is not a usable string", () => {
+    const { dir } = scratch();
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: 42 } }),
+    );
+    withAgentDir(dir);
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(join(dir, "sessions", "states.sqlite"))).toBe(true);
+  });
+
+  it("expands a ~ configured value against the home directory", () => {
+    const { dir } = scratch();
+    const home = scratch().dir;
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: "~/tilde/db.sqlite" } }),
+    );
+    withAgentDir(dir);
+    const previousHome = process.env.HOME;
+    process.env.HOME = home;
+    envRestores.push(() => {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+    });
+
+    const state = openSessionState<{ v: number }>({ pluginId: "role" });
+    state.write(contextOf("s1", [{ id: "a", parentId: null }], "a"), { v: 1 });
+
+    expect(existsSync(join(home, "tilde", "db.sqlite"))).toBe(true);
+  });
+
+  it("switching the configured location starts from an empty database", () => {
+    const { dir } = scratch();
+    withAgentDir(dir);
+    const first = join(dir, "first.sqlite");
+    const second = join(dir, "second.sqlite");
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: first } }),
+    );
+    const ctx = contextOf("s1", [{ id: "a", parentId: null }], "a");
+    openSessionState<{ v: number }>({ pluginId: "role" }).write(ctx, { v: 1 });
+    expect(existsSync(first)).toBe(true);
+
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: second } }),
+    );
+    const moved = openSessionState<{ v: number }>({ pluginId: "role" });
+    expect(moved.read(ctx)).toBeUndefined();
   });
 });
