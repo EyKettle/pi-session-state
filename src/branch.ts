@@ -4,9 +4,7 @@ export interface SessionTreeView {
 }
 
 // architecture.md -> branch determination: the key is the top of the
-// single-child segment containing the leaf. Walk up while the parent has
-// exactly one child; the first node whose parent is missing, or whose parent
-// has a child count other than one, is the key.
+// single-child segment containing the leaf.
 export function branchKeyFromLeaf(
   view: SessionTreeView,
   leaf: string | null,

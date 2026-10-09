@@ -162,7 +162,6 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-// Whether the holder recorded in a lock row names a live process.
 export type HolderStatus = "alive" | "not-alive" | "unknown";
 
 // Whether the holder recorded in a lock row names a live process.
@@ -173,15 +172,12 @@ export function holderStatus(holder: string): HolderStatus {
 }
 
 // store.ts -> key to row: SQLite reads and writes, an in-process cache, and
-// the branch ascent. A branch read that misses the current key ascends run
-// tops and, on its first hit, writes the value under the current key
-// (materialization) before returning it. Explicit writes and drops hold a
-// session-level lock (a write_lock row keyed by session) so a concurrent
-// same-session writer is refused; a crash-left row is taken over once it
-// ages past the lease. Cross-session contention waits on SQLite. Read-path
-// writes (materialization, landing a keyless value) are lock-free so reads
-// can proceed. The tree view needed by the ascent arrives as an argument;
-// this module reads no context and no Pi.
+// the branch ascent. Explicit writes and drops hold a session-level lock (a
+// write_lock row keyed by session) so a concurrent same-session writer is
+// refused, while cross-session contention waits on SQLite. Read-path writes
+// (materializing an ascent hit, landing a keyless value) stay lock-free so
+// reads can proceed. The tree view needed for the ascent arrives as an
+// argument, so this module reads no context and no Pi.
 export class SessionStore {
   readonly #path: string;
   #state: OpenState | undefined;
