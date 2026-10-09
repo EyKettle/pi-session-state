@@ -6,8 +6,12 @@ import type {
   ExtensionContext,
 } from "../deps/pi-coding-agent.ts";
 import { resolveAgentDatabasePath } from "./settings.ts";
-import { holderIsAlive, openStore, type SessionStore } from "./store.ts";
+import { holderStatus, openStore, type SessionStore } from "./store.ts";
 
+function holderState(holder: string): string {
+  const status = holderStatus(holder);
+  return status === "not-alive" ? "not alive" : status;
+}
 function statusLines(
   databasePath: string,
   sessionId: string,
@@ -17,9 +21,7 @@ function statusLines(
   const lock =
     report.lock === undefined
       ? "lock: none"
-      : `lock: ${report.lock.holder} (${
-          holderIsAlive(report.lock.holder) ? "alive" : "not alive"
-        })`;
+      : `lock: ${report.lock.holder} (${holderState(report.lock.holder)})`;
   const rows =
     report.rowsByPlugin.length === 0
       ? "state rows: none"
@@ -80,11 +82,11 @@ export default function extension(pi: ExtensionAPI): void {
     ): Promise<void> => {
       const sessionId = ctx.sessionManager.getSessionId();
       const lock = store.inspectSession(sessionId).lock;
-      if (lock !== undefined && holderIsAlive(lock.holder)) {
+      if (lock !== undefined && holderStatus(lock.holder) !== "not-alive") {
         if (!ctx.hasUI) return;
         const confirmed = await ctx.ui.confirm(
           "session-state: clear the session lock?",
-          `The lock row is held by ${lock.holder}, which is still alive. Clear it anyway?`,
+          `The lock row is held by ${lock.holder} (${holderState(lock.holder)}). Clear it anyway?`,
         );
         if (!confirmed) {
           ctx.ui.notify(

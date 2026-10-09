@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { branchKeyFromLeaf, type SessionTreeView } from "../src/branch.ts";
 import {
+  holderStatus,
   openStore,
   SessionWriteRefusedError,
   type StateKey,
@@ -490,5 +491,11 @@ describe("session store", () => {
     const store = openStore(path);
     expect(store.inspectSession("s1")).toEqual({ lock: undefined, rowsByPlugin: [] });
     expect(existsSync(path)).toBe(false);
+  });
+
+  it("reports a holder as alive, not alive, or unknown", () => {
+    expect(holderStatus("pid:1")).toBe("alive");
+    expect(holderStatus("pid:999999")).toBe("not-alive");
+    expect(holderStatus("garbage")).toBe("unknown");
   });
 });

@@ -163,9 +163,13 @@ function isProcessAlive(pid: number): boolean {
 }
 
 // Whether the holder recorded in a lock row names a live process.
-export function holderIsAlive(holder: string): boolean {
+export type HolderStatus = "alive" | "not-alive" | "unknown";
+
+// Whether the holder recorded in a lock row names a live process.
+export function holderStatus(holder: string): HolderStatus {
   const pid = parseHolderPid(holder);
-  return pid === null ? false : isProcessAlive(pid);
+  if (pid === null) return "unknown";
+  return isProcessAlive(pid) ? "alive" : "not-alive";
 }
 
 // store.ts -> key to row: SQLite reads and writes, an in-process cache, and

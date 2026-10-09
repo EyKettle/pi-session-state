@@ -342,4 +342,35 @@ describe("extension entry", () => {
     expect(messages[0]).toContain("state rows: none");
     expect(existsSync(path)).toBe(false);
   });
+
+  it("/state:status shows an unidentifiable holder as unknown", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "garbage");
+
+    const messages: string[] = [];
+    await commands.get("state:status")?.handler("", contextFor("s1", true, messages));
+    expect(messages[0]).toContain("lock: garbage (unknown)");
+  });
+
+  it("/state:force-refresh confirms before clearing an unidentifiable holder", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "garbage");
+
+    const keptCalls: string[] = [];
+    await commands
+      .get("state:force-refresh")
+      ?.handler("", contextFor("s1", true, [], false, keptCalls));
+    expect(keptCalls).toHaveLength(1);
+    expect(lockHolderAt(path, "s1")).toBe("garbage");
+  });
 });
