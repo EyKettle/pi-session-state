@@ -10,17 +10,19 @@ export type ConfiguredLocation =
 
 export interface LocationSources {
   text: string | undefined;
-  agentDir: string;
+  baseDir: string;
   homeDir: string;
 }
 
 // The only reader of sessionState.databasePath: callers hand in the settings
-// text and the two directories, so the resolution is testable without a
-// settings file on disk.
+// text and the directories, so the resolution is testable without a settings
+// file on disk. A relative value resolves under the base directory it is
+// given: the agent directory for the user file, the project .pi for the
+// project file.
 export function resolveConfiguredLocation(
   sources: LocationSources,
 ): ConfiguredLocation {
-  const { text, agentDir, homeDir } = sources;
+  const { text, baseDir, homeDir } = sources;
   if (text === undefined) return { kind: "unset" };
 
   let parsed: unknown;
@@ -46,39 +48,77 @@ export function resolveConfiguredLocation(
     return { kind: "unsupported" };
   }
   if (isAbsolute(value)) return { kind: "absolute", path: value };
-  return { kind: "absolute", path: join(agentDir, value) };
+  return { kind: "absolute", path: join(baseDir, value) };
 }
 
 // A missing or unreadable settings file means no configured value.
-export function readSettingsText(agentDir: string): string | undefined {
+export function readSettingsText(settingsDir: string): string | undefined {
   try {
-    return readFileSync(join(agentDir, "settings.json"), "utf8");
+    return readFileSync(join(settingsDir, "settings.json"), "utf8");
   } catch {
     return undefined;
   }
 }
 
-export interface AgentDatabasePath {
+export type ConfiguredState =
+  | "used"
+  | "unset"
+  | "malformed"
+  | "invalid"
+  | "unsupported";
+
+export interface DatabaseLocation {
   path: string;
-  configured: "used" | "unset" | "malformed" | "invalid" | "unsupported";
+  configured: ConfiguredState;
+  source?: string;
 }
 
-// Reads the agent settings file and resolves the location, falling back to
-// the default under the agent directory.
-export function resolveAgentDatabasePath(
-  agentDir: string,
-  homeDir: string,
-): AgentDatabasePath {
-  const configured = resolveConfiguredLocation({
+export interface DatabaseLocationInputs {
+  agentDir: string;
+  homeDir: string;
+  projectDir?: string;
+  projectTrusted?: boolean;
+}
+
+// The four sources, first hit wins: the integration parameter is applied by
+// the caller; here the project file (only while the project is trusted) and
+// the agent file are read, and the default under the agent directory is the
+// fallback.
+export function resolveDatabaseLocation(
+  inputs: DatabaseLocationInputs,
+): DatabaseLocation {
+  const { agentDir, homeDir, projectDir, projectTrusted = false } = inputs;
+  const agentSource = join(agentDir, "settings.json");
+  const projectSource =
+    projectDir === undefined ? undefined : join(projectDir, "settings.json");
+
+  const project: ConfiguredLocation =
+    projectDir !== undefined && projectTrusted
+      ? resolveConfiguredLocation({
+          text: readSettingsText(projectDir),
+          baseDir: projectDir,
+          homeDir,
+        })
+      : { kind: "unset" };
+  if (project.kind === "absolute") {
+    return { path: project.path, configured: "used", source: projectSource };
+  }
+
+  const agent = resolveConfiguredLocation({
     text: readSettingsText(agentDir),
-    agentDir,
+    baseDir: agentDir,
     homeDir,
   });
-  if (configured.kind === "absolute") {
-    return { path: configured.path, configured: "used" };
+  if (agent.kind === "absolute") {
+    return { path: agent.path, configured: "used", source: agentSource };
   }
-  return {
-    path: join(agentDir, "sessions", "states.sqlite"),
-    configured: configured.kind,
-  };
+
+  const defaultPath = join(agentDir, "sessions", "states.sqlite");
+  if (project.kind !== "unset") {
+    return { path: defaultPath, configured: project.kind, source: projectSource };
+  }
+  if (agent.kind !== "unset") {
+    return { path: defaultPath, configured: agent.kind, source: agentSource };
+  }
+  return { path: defaultPath, configured: "unset" };
 }

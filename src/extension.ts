@@ -1,17 +1,19 @@
 import { homedir } from "node:os";
-import { getAgentDir } from "../deps/pi-coding-agent.ts";
+import { join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "../deps/pi-coding-agent.ts";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
 } from "../deps/pi-coding-agent.ts";
-import { resolveAgentDatabasePath } from "./settings.ts";
+import { resolveDatabaseLocation } from "./settings.ts";
 import { holderStatus, openStore, type SessionStore } from "./store.ts";
 
 function holderState(holder: string): string {
   const status = holderStatus(holder);
   return status === "not-alive" ? "not alive" : status;
 }
+
 function statusLines(
   databasePath: string,
   sessionId: string,
@@ -32,27 +34,35 @@ function statusLines(
 }
 
 // The Pi entry: package.json's pi.extensions points here. It starts no
-// long-lived resource; the store opens lazily on first use.
+// long-lived resource; the location is resolved at session start, where the
+// context carries the project directory and the trust state.
 export default function extension(pi: ExtensionAPI): void {
-  const location = resolveAgentDatabasePath(getAgentDir(), homedir());
-  const store = openStore(location.path);
+  let current: { path: string; store: SessionStore } | undefined;
 
   pi.on("session_start", (_event: unknown, ctx: ExtensionContext): void => {
+    const location = resolveDatabaseLocation({
+      agentDir: getAgentDir(),
+      homeDir: homedir(),
+      projectDir: join(ctx.cwd, CONFIG_DIR_NAME),
+      projectTrusted: ctx.isProjectTrusted(),
+    });
+    current = { path: location.path, store: openStore(location.path) };
+
     if (!ctx.hasUI) return;
     const fallback = `using the default location ${location.path}`;
     if (location.configured === "malformed") {
       ctx.ui.notify(
-        `session-state: the settings file is not valid JSON; ${fallback}`,
+        `session-state: the settings file ${location.source} is not valid JSON; ${fallback}`,
         "warning",
       );
     } else if (location.configured === "invalid") {
       ctx.ui.notify(
-        `session-state: the sessionState.databasePath setting is not a non-empty string; ${fallback}`,
+        `session-state: the sessionState.databasePath setting in ${location.source} is not a non-empty string; ${fallback}`,
         "warning",
       );
     } else if (location.configured === "unsupported") {
       ctx.ui.notify(
-        `session-state: the sessionState.databasePath setting uses a "~user" form the contract cannot express; ${fallback}`,
+        `session-state: the sessionState.databasePath setting in ${location.source} uses a "~user" form the contract cannot express; ${fallback}`,
         "warning",
       );
     }
@@ -64,11 +74,11 @@ export default function extension(pi: ExtensionAPI): void {
       _args: string,
       ctx: ExtensionCommandContext,
     ): Promise<void> => {
-      if (!ctx.hasUI) return;
+      if (!ctx.hasUI || current === undefined) return;
       const lines = statusLines(
-        location.path,
+        current.path,
         ctx.sessionManager.getSessionId(),
-        store,
+        current.store,
       );
       ctx.ui.notify(lines.join("\n"), "info");
     },
@@ -80,8 +90,9 @@ export default function extension(pi: ExtensionAPI): void {
       _args: string,
       ctx: ExtensionCommandContext,
     ): Promise<void> => {
+      if (current === undefined) return;
       const sessionId = ctx.sessionManager.getSessionId();
-      const lock = store.inspectSession(sessionId).lock;
+      const lock = current.store.inspectSession(sessionId).lock;
       if (lock !== undefined && holderStatus(lock.holder) !== "not-alive") {
         if (!ctx.hasUI) return;
         const confirmed = await ctx.ui.confirm(
@@ -96,8 +107,8 @@ export default function extension(pi: ExtensionAPI): void {
           return;
         }
       }
-      store.releaseSessionLock(sessionId);
-      store.dropSessionCache(sessionId);
+      current.store.releaseSessionLock(sessionId);
+      current.store.dropSessionCache(sessionId);
       if (ctx.hasUI) {
         ctx.ui.notify(
           `session-state: /state:force-refresh removed the lock row (holder ${

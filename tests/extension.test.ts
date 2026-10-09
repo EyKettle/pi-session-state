@@ -1,4 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -71,12 +77,18 @@ function loadExtension(): LoadedExtension {
   return { commands, events };
 }
 
+interface ContextOptions {
+  cwd?: string;
+  trusted?: boolean;
+}
+
 function contextFor(
   sessionId: string,
   hasUI: boolean,
   messages: string[],
   confirmResult = true,
   confirmCalls: string[] = [],
+  options: ContextOptions = {},
 ): ExtensionCommandContext {
   return {
     sessionManager: {
@@ -85,6 +97,8 @@ function contextFor(
       getEntries: () => [],
     },
     hasUI,
+    cwd: options.cwd ?? process.cwd(),
+    isProjectTrusted: () => options.trusted ?? false,
     ui: {
       notify: (message: string) => {
         messages.push(message);
@@ -95,6 +109,13 @@ function contextFor(
       },
     },
   } as unknown as ExtensionCommandContext;
+}
+
+async function startSession(
+  loaded: LoadedExtension,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  await loaded.events.get("session_start")?.({}, ctx);
 }
 
 function seedLock(path: string, sessionId: string, holder: string): void {
@@ -126,10 +147,20 @@ describe("extension entry", () => {
     expect(commands.has("state:status")).toBe(true);
   });
 
+  it("registers /state:force-refresh", () => {
+    const { commands } = loadExtension();
+    expect(commands.has("state:force-refresh")).toBe(true);
+  });
+
+  it("registers the session_start report", () => {
+    const { events } = loadExtension();
+    expect(events.has("session_start")).toBe(true);
+  });
+
   it("/state:status reports the database path, the lock row, and per-plugin rows", async () => {
     const dir = scratch();
     withAgentDir(dir);
-    const { commands } = loadExtension();
+    const loaded = loadExtension();
     const path = join(dir, "sessions", "states.sqlite");
     const store = openStore(path);
     store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "a");
@@ -137,7 +168,9 @@ describe("extension entry", () => {
     seedLock(path, "s1", "pid:1");
 
     const messages: string[] = [];
-    await commands.get("state:status")?.handler("", contextFor("s1", true, messages));
+    const ctx = contextFor("s1", true, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:status")?.handler("", ctx);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain(`database: ${path}`);
     expect(messages[0]).toContain("lock: pid:1 (alive)");
@@ -145,7 +178,9 @@ describe("extension entry", () => {
     expect(messages[0]).toContain("skill-tools: 1");
 
     const empty: string[] = [];
-    await commands.get("state:status")?.handler("", contextFor("s2", true, empty));
+    await loaded.commands
+      .get("state:status")
+      ?.handler("", contextFor("s2", true, empty));
     expect(empty).toHaveLength(1);
     expect(empty[0]).toContain("lock: none");
     expect(empty[0]).toContain("state rows: none");
@@ -154,21 +189,34 @@ describe("extension entry", () => {
   it("stays silent without a UI", async () => {
     const dir = scratch();
     withAgentDir(dir);
-    const { commands } = loadExtension();
+    const loaded = loadExtension();
     const messages: string[] = [];
-    await commands.get("state:status")?.handler("", contextFor("s1", false, messages));
+    const ctx = contextFor("s1", false, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:status")?.handler("", ctx);
     expect(messages).toHaveLength(0);
   });
 
-  it("registers /state:force-refresh", () => {
-    const { commands } = loadExtension();
-    expect(commands.has("state:force-refresh")).toBe(true);
+  it("/state:status does not create the database", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const loaded = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+
+    const messages: string[] = [];
+    const ctx = contextFor("s1", true, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:status")?.handler("", ctx);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("lock: none");
+    expect(messages[0]).toContain("state rows: none");
+    expect(existsSync(path)).toBe(false);
   });
 
   it("/state:force-refresh clears the lock row and this process's cache, leaving state rows", async () => {
     const dir = scratch();
     withAgentDir(dir);
-    const { commands } = loadExtension();
+    const loaded = loadExtension();
     const path = join(dir, "sessions", "states.sqlite");
     const store = openStore(path);
     const key = { pluginId: "role", sessionId: "s1", branchId: "" };
@@ -190,7 +238,9 @@ describe("extension entry", () => {
     seedLock(path, "s1", "pid:999999");
 
     const messages: string[] = [];
-    await commands.get("state:force-refresh")?.handler("", contextFor("s1", true, messages));
+    const ctx = contextFor("s1", true, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:force-refresh")?.handler("", ctx);
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain("next read comes from disk");
 
@@ -215,25 +265,25 @@ describe("extension entry", () => {
   it("/state:force-refresh asks before clearing a live holder's lock", async () => {
     const dir = scratch();
     withAgentDir(dir);
-    const { commands } = loadExtension();
+    const loaded = loadExtension();
     const path = join(dir, "sessions", "states.sqlite");
     const store = openStore(path);
     store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
     seedLock(path, "s1", "pid:1");
 
-    const keptMessages: string[] = [];
+    await startSession(loaded, contextFor("s1", true, []));
+
     const keptCalls: string[] = [];
-    await commands
+    await loaded.commands
       .get("state:force-refresh")
-      ?.handler("", contextFor("s1", true, keptMessages, false, keptCalls));
+      ?.handler("", contextFor("s1", true, [], false, keptCalls));
     expect(keptCalls).toHaveLength(1);
     expect(lockHolderAt(path, "s1")).toBe("pid:1");
 
-    const clearedMessages: string[] = [];
     const clearedCalls: string[] = [];
-    await commands
+    await loaded.commands
       .get("state:force-refresh")
-      ?.handler("", contextFor("s1", true, clearedMessages, true, clearedCalls));
+      ?.handler("", contextFor("s1", true, [], true, clearedCalls));
     expect(clearedCalls).toHaveLength(1);
     expect(lockHolderAt(path, "s1")).toBeUndefined();
   });
@@ -241,16 +291,53 @@ describe("extension entry", () => {
   it("/state:force-refresh does not clear a live holder without a UI to confirm", async () => {
     const dir = scratch();
     withAgentDir(dir);
-    const { commands } = loadExtension();
+    const loaded = loadExtension();
     const path = join(dir, "sessions", "states.sqlite");
     const store = openStore(path);
     store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
     seedLock(path, "s1", "pid:1");
 
     const messages: string[] = [];
-    await commands.get("state:force-refresh")?.handler("", contextFor("s1", false, messages));
+    const ctx = contextFor("s1", false, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:force-refresh")?.handler("", ctx);
     expect(messages).toHaveLength(0);
     expect(lockHolderAt(path, "s1")).toBe("pid:1");
+  });
+
+  it("/state:status shows an unidentifiable holder as unknown", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const loaded = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "garbage");
+
+    const messages: string[] = [];
+    const ctx = contextFor("s1", true, messages);
+    await startSession(loaded, ctx);
+    await loaded.commands.get("state:status")?.handler("", ctx);
+    expect(messages[0]).toContain("lock: garbage (unknown)");
+  });
+
+  it("/state:force-refresh confirms before clearing an unidentifiable holder", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const loaded = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "garbage");
+
+    await startSession(loaded, contextFor("s1", true, []));
+
+    const keptCalls: string[] = [];
+    await loaded.commands
+      .get("state:force-refresh")
+      ?.handler("", contextFor("s1", true, [], false, keptCalls));
+    expect(keptCalls).toHaveLength(1);
+    expect(lockHolderAt(path, "s1")).toBe("garbage");
   });
 
   it("reports an unusable configured location at session_start", async () => {
@@ -267,6 +354,36 @@ describe("extension entry", () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain("sessionState.databasePath");
     expect(messages[0]).toContain(join(dir, "sessions", "states.sqlite"));
+    expect(messages[0]).toContain(join(dir, "settings.json"));
+  });
+
+  it("reports a settings file that is not valid JSON at session_start", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(join(dir, "settings.json"), "not json");
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("not valid JSON");
+    expect(messages[0]).toContain(join(dir, "settings.json"));
+  });
+
+  it("reports a ~user configured location at session_start", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    writeFileSync(
+      join(dir, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: "~other/db.sqlite" } }),
+    );
+    const { events } = loadExtension();
+
+    const messages: string[] = [];
+    await events.get("session_start")?.({}, contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("~user");
+    expect(messages[0]).toContain(join(dir, "settings.json"));
   });
 
   it("stays silent for a usable or absent configured location", async () => {
@@ -278,13 +395,17 @@ describe("extension entry", () => {
     );
     const usable = loadExtension();
     const usableMessages: string[] = [];
-    await usable.events.get("session_start")?.({}, contextFor("s1", true, usableMessages));
+    await usable.events
+      .get("session_start")
+      ?.({}, contextFor("s1", true, usableMessages));
     expect(usableMessages).toHaveLength(0);
 
     rmSync(join(dir, "settings.json"));
     const absent = loadExtension();
     const absentMessages: string[] = [];
-    await absent.events.get("session_start")?.({}, contextFor("s1", true, absentMessages));
+    await absent.events
+      .get("session_start")
+      ?.({}, contextFor("s1", true, absentMessages));
     expect(absentMessages).toHaveLength(0);
   });
 
@@ -302,75 +423,59 @@ describe("extension entry", () => {
     expect(messages).toHaveLength(0);
   });
 
-  it("reports a settings file that is not valid JSON at session_start", async () => {
-    const dir = scratch();
-    withAgentDir(dir);
-    writeFileSync(join(dir, "settings.json"), "not json");
-    const { events } = loadExtension();
-
-    const messages: string[] = [];
-    await events.get("session_start")?.({}, contextFor("s1", true, messages));
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain("not valid JSON");
-  });
-
-  it("reports a ~user configured location at session_start", async () => {
-    const dir = scratch();
-    withAgentDir(dir);
+  it("a trusted project settings file overrides the agent file", async () => {
+    const cwd = scratch();
+    const agent = scratch();
+    withAgentDir(agent);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    const projectPath = join(cwd, "project.sqlite");
     writeFileSync(
-      join(dir, "settings.json"),
-      JSON.stringify({ sessionState: { databasePath: "~other/db.sqlite" } }),
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: projectPath } }),
     );
-    const { events } = loadExtension();
+    writeFileSync(
+      join(agent, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: join(agent, "agent.sqlite") } }),
+    );
 
+    const loaded = loadExtension();
     const messages: string[] = [];
-    await events.get("session_start")?.({}, contextFor("s1", true, messages));
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain("~user");
+    await startSession(
+      loaded,
+      contextFor("s1", true, messages, true, [], { cwd, trusted: true }),
+    );
+    expect(messages).toHaveLength(0);
+
+    const status: string[] = [];
+    await loaded.commands
+      .get("state:status")
+      ?.handler("", contextFor("s1", true, status, true, [], { cwd, trusted: true }));
+    expect(status[0]).toContain(`database: ${projectPath}`);
   });
 
-  it("/state:status does not create the database", async () => {
-    const dir = scratch();
-    withAgentDir(dir);
-    const { commands } = loadExtension();
-    const path = join(dir, "sessions", "states.sqlite");
+  it("an untrusted project settings file is ignored", async () => {
+    const cwd = scratch();
+    const agent = scratch();
+    withAgentDir(agent);
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: join(cwd, "project.sqlite") } }),
+    );
+    const agentPath = join(agent, "agent.sqlite");
+    writeFileSync(
+      join(agent, "settings.json"),
+      JSON.stringify({ sessionState: { databasePath: agentPath } }),
+    );
 
-    const messages: string[] = [];
-    await commands.get("state:status")?.handler("", contextFor("s1", true, messages));
-    expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain("lock: none");
-    expect(messages[0]).toContain("state rows: none");
-    expect(existsSync(path)).toBe(false);
-  });
+    const loaded = loadExtension();
+    const ctx = contextFor("s1", true, [], true, [], { cwd, trusted: false });
+    await startSession(loaded, ctx);
 
-  it("/state:status shows an unidentifiable holder as unknown", async () => {
-    const dir = scratch();
-    withAgentDir(dir);
-    const { commands } = loadExtension();
-    const path = join(dir, "sessions", "states.sqlite");
-    const store = openStore(path);
-    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
-    seedLock(path, "s1", "garbage");
-
-    const messages: string[] = [];
-    await commands.get("state:status")?.handler("", contextFor("s1", true, messages));
-    expect(messages[0]).toContain("lock: garbage (unknown)");
-  });
-
-  it("/state:force-refresh confirms before clearing an unidentifiable holder", async () => {
-    const dir = scratch();
-    withAgentDir(dir);
-    const { commands } = loadExtension();
-    const path = join(dir, "sessions", "states.sqlite");
-    const store = openStore(path);
-    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
-    seedLock(path, "s1", "garbage");
-
-    const keptCalls: string[] = [];
-    await commands
-      .get("state:force-refresh")
-      ?.handler("", contextFor("s1", true, [], false, keptCalls));
-    expect(keptCalls).toHaveLength(1);
-    expect(lockHolderAt(path, "s1")).toBe("garbage");
+    const status: string[] = [];
+    await loaded.commands
+      .get("state:status")
+      ?.handler("", contextFor("s1", true, status, true, [], { cwd, trusted: false }));
+    expect(status[0]).toContain(`database: ${agentPath}`);
   });
 });
