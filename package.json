@@ -1,26 +1,49 @@
 {
   "name": "pi-session-state",
   "version": "0.1.0",
-  "type": "module",
-  "private": true,
   "description": "Session-scoped, optionally branch-scoped JSON state over one SQLite file, for Pi extensions",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "session",
+    "state",
+    "sqlite"
+  ],
   "license": "MIT",
+  "author": "eykettle <eykettle@163.com>",
+  "homepage": "https://github.com/EyKettle/pi-session-state#readme",
+  "bugs": {
+    "url": "https://github.com/EyKettle/pi-session-state/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EyKettle/pi-session-state.git"
+  },
+  "type": "module",
   "packageManager": "pnpm@12.9.1",
   "engines": {
     "node": ">=22.13"
   },
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
   },
   "pi": {
     "extensions": ["./src/extension.ts"]
   },
+  "files": [
+    "src",
+    "deps",
+    "docs",
+    "docs_zh-CN"
+  ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^1.1.0"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
