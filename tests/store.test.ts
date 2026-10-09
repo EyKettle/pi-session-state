@@ -414,4 +414,74 @@ describe("session store", () => {
     ) as { name: string } | undefined;
     expect(column?.name).toBe("acquired_at");
   });
+
+  it("releasing a session's lock row leaves the state rows intact", () => {
+    const { path } = scratch();
+    const store = openStore(path);
+    store.write(keyOf("p", "s1"), "v");
+    rawRun(
+      path,
+      "INSERT OR REPLACE INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)",
+      "s1",
+      "pid:1",
+      Date.now(),
+    );
+
+    store.releaseSessionLock("s1");
+
+    expect(lockHolder(path, "s1")).toBeUndefined();
+    expect(valueAt(path, "p", "s1", "")).toBe(JSON.stringify("v"));
+  });
+
+  it("dropping a session's cache makes a later read consult the disk", () => {
+    const { path } = scratch();
+    const store = openStore(path);
+    store.write(keyOf("p", "s"), "v1");
+    store.write(keyOf("p", "s", null), "pending");
+    expect(store.read(keyOf("p", "s"), null)).toBe("v1");
+
+    rawRun(
+      path,
+      "UPDATE state SET value = ? WHERE plugin_id = ? AND session_id = ? AND branch_id = ?",
+      JSON.stringify("v2"),
+      "p",
+      "s",
+      "",
+    );
+    expect(store.read(keyOf("p", "s"), null)).toBe("v1");
+
+    store.dropSessionCache("s");
+
+    expect(store.read(keyOf("p", "s"), null)).toBe("v2");
+    expect(store.read(keyOf("p", "s", null), null)).toBe("pending");
+  });
+
+  it("inspection reports the lock row and per-plugin row counts, read-only", () => {
+    const { path } = scratch();
+    const store = openStore(path);
+    store.write(keyOf("role", "s1"), "a");
+    store.write(keyOf("skill-tools", "s1", "k"), "b");
+    store.write(keyOf("role", "s2"), "c");
+    rawRun(
+      path,
+      "INSERT OR REPLACE INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)",
+      "s1",
+      "pid:1",
+      1700000000000,
+    );
+
+    expect(store.inspectSession("s1")).toEqual({
+      lock: { holder: "pid:1", acquiredAt: 1700000000000 },
+      rowsByPlugin: [
+        { pluginId: "role", count: 1 },
+        { pluginId: "skill-tools", count: 1 },
+      ],
+    });
+    expect(store.inspectSession("fresh")).toEqual({
+      lock: undefined,
+      rowsByPlugin: [],
+    });
+    expect(lockHolder(path, "s1")).toBe("pid:1");
+    expect(sessionRowCount(path, "role", "s1")).toBe(1);
+  });
 });

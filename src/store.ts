@@ -28,6 +28,12 @@ type KeyedStateKey = {
 type ValueEntry = { kind: "value"; json: string };
 type CacheEntry = ValueEntry | { kind: "absent" };
 
+// The read-only report the extension entry's commands render.
+export interface SessionInspection {
+  lock: { holder: string; acquiredAt: number } | undefined;
+  rowsByPlugin: Array<{ pluginId: string; count: number }>;
+}
+
 type OpenState = {
   database: DatabaseSync;
   select: StatementSync;
@@ -37,6 +43,8 @@ type OpenState = {
   lockSelect: StatementSync;
   lockUpdate: StatementSync;
   lockDelete: StatementSync;
+  lockRelease: StatementSync;
+  rowsByPlugin: StatementSync;
 };
 
 // The refusal carries its four elements in the message and as fields:
@@ -86,6 +94,9 @@ const LOCK_SELECT =
 const LOCK_UPDATE =
   "UPDATE write_lock SET holder = ?, acquired_at = ? WHERE session_id = ? AND holder = ? AND acquired_at = ?";
 const LOCK_DELETE = "DELETE FROM write_lock WHERE session_id = ? AND holder = ?";
+const LOCK_RELEASE = "DELETE FROM write_lock WHERE session_id = ?";
+const ROWS_BY_PLUGIN =
+  "SELECT plugin_id, COUNT(*) AS count FROM state WHERE session_id = ? GROUP BY plugin_id ORDER BY plugin_id";
 
 // Cross-session contention waits on SQLite instead of failing immediately.
 const BUSY_TIMEOUT_MS = 5000;
@@ -233,6 +244,40 @@ export class SessionStore {
     }
   }
 
+  // The extension entry's seam: a session's lock row can be released, this
+  // process's cache for it dropped, and its contents inspected. The library
+  // surface gains nothing.
+  releaseSessionLock(sessionId: string): void {
+    this.#ready().lockRelease.run(sessionId);
+  }
+
+  dropSessionCache(sessionId: string): void {
+    for (const cacheKey of [...this.#cache.keys()]) {
+      if (cacheKey.split("\u0000")[1] === sessionId) this.#cache.delete(cacheKey);
+    }
+  }
+
+  inspectSession(sessionId: string): SessionInspection {
+    const { lockSelect, rowsByPlugin } = this.#ready();
+    const lockRow = lockSelect.get(sessionId) as
+      | { holder: string; acquired_at: number }
+      | undefined;
+    const rows = rowsByPlugin.all(sessionId) as Array<{
+      plugin_id: string;
+      count: number;
+    }>;
+    return {
+      lock:
+        lockRow === undefined
+          ? undefined
+          : { holder: lockRow.holder, acquiredAt: lockRow.acquired_at },
+      rowsByPlugin: rows.map((row) => ({
+        pluginId: row.plugin_id,
+        count: row.count,
+      })),
+    };
+  }
+
   // A keyless value lands under the first key the context yields.
   #flushPending(key: KeyedStateKey): void {
     const pending = this.#pending.get(pendingKeyOf(key.pluginId, key.sessionId));
@@ -364,6 +409,8 @@ export class SessionStore {
         lockSelect: database.prepare(LOCK_SELECT),
         lockUpdate: database.prepare(LOCK_UPDATE),
         lockDelete: database.prepare(LOCK_DELETE),
+        lockRelease: database.prepare(LOCK_RELEASE),
+        rowsByPlugin: database.prepare(ROWS_BY_PLUGIN),
       };
     } catch (error) {
       throw new Error(
