@@ -75,6 +75,8 @@ function contextFor(
   sessionId: string,
   hasUI: boolean,
   messages: string[],
+  confirmResult = true,
+  confirmCalls: string[] = [],
 ): ExtensionCommandContext {
   return {
     sessionManager: {
@@ -87,6 +89,10 @@ function contextFor(
       notify: (message: string) => {
         messages.push(message);
       },
+      confirm: async (title: string, message: string) => {
+        confirmCalls.push(`${title} :: ${message}`);
+        return confirmResult;
+      },
     },
   } as unknown as ExtensionCommandContext;
 }
@@ -97,6 +103,18 @@ function seedLock(path: string, sessionId: string, holder: string): void {
     db.prepare(
       "INSERT OR REPLACE INTO write_lock (session_id, holder, acquired_at) VALUES (?, ?, ?)",
     ).run(sessionId, holder, Date.now());
+  } finally {
+    db.close();
+  }
+}
+
+function lockHolderAt(path: string, sessionId: string): string | undefined {
+  const db = new DatabaseSync(path);
+  try {
+    const row = db
+      .prepare("SELECT holder FROM write_lock WHERE session_id = ?")
+      .get(sessionId) as { holder: string } | undefined;
+    return row?.holder;
   } finally {
     db.close();
   }
@@ -140,5 +158,98 @@ describe("extension entry", () => {
     const messages: string[] = [];
     await commands.get("state:status")?.handler("", contextFor("s1", false, messages));
     expect(messages).toHaveLength(0);
+  });
+
+  it("registers /state:force-refresh", () => {
+    const { commands } = loadExtension();
+    expect(commands.has("state:force-refresh")).toBe(true);
+  });
+
+  it("/state:force-refresh clears the lock row and this process's cache, leaving state rows", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    const key = { pluginId: "role", sessionId: "s1", branchId: "" };
+    store.write(key, "v1");
+    expect(store.read(key, null)).toBe("v1");
+
+    const other = new DatabaseSync(path);
+    try {
+      other
+        .prepare(
+          "UPDATE state SET value = ? WHERE plugin_id = ? AND session_id = ? AND branch_id = ?",
+        )
+        .run(JSON.stringify("v2"), "role", "s1", "");
+    } finally {
+      other.close();
+    }
+    expect(store.read(key, null)).toBe("v1");
+
+    seedLock(path, "s1", "pid:999999");
+
+    const messages: string[] = [];
+    await commands.get("state:force-refresh")?.handler("", contextFor("s1", true, messages));
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("next read comes from disk");
+
+    const db = new DatabaseSync(path);
+    try {
+      expect(
+        (db
+          .prepare("SELECT COUNT(*) AS n FROM write_lock WHERE session_id = ?")
+          .get("s1") as { n: number }).n,
+      ).toBe(0);
+      expect(
+        (db
+          .prepare("SELECT COUNT(*) AS n FROM state WHERE session_id = ?")
+          .get("s1") as { n: number }).n,
+      ).toBe(1);
+    } finally {
+      db.close();
+    }
+    expect(store.read(key, null)).toBe("v2");
+  });
+
+  it("/state:force-refresh asks before clearing a live holder's lock", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "pid:1");
+
+    const keptMessages: string[] = [];
+    const keptCalls: string[] = [];
+    await commands
+      .get("state:force-refresh")
+      ?.handler("", contextFor("s1", true, keptMessages, false, keptCalls));
+    expect(keptCalls).toHaveLength(1);
+    expect(lockHolderAt(path, "s1")).toBe("pid:1");
+
+    const clearedMessages: string[] = [];
+    const clearedCalls: string[] = [];
+    await commands
+      .get("state:force-refresh")
+      ?.handler("", contextFor("s1", true, clearedMessages, true, clearedCalls));
+    expect(clearedCalls).toHaveLength(1);
+    expect(lockHolderAt(path, "s1")).toBeUndefined();
+  });
+
+  it("/state:force-refresh does not clear a live holder without a UI to confirm", async () => {
+    const dir = scratch();
+    withAgentDir(dir);
+    const { commands } = loadExtension();
+    const path = join(dir, "sessions", "states.sqlite");
+    const store = openStore(path);
+    store.write({ pluginId: "role", sessionId: "s1", branchId: "" }, "v");
+    seedLock(path, "s1", "pid:1");
+
+    const messages: string[] = [];
+    await commands.get("state:force-refresh")?.handler("", contextFor("s1", false, messages));
+    expect(messages).toHaveLength(0);
+    expect(lockHolderAt(path, "s1")).toBe("pid:1");
   });
 });

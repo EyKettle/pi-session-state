@@ -49,4 +49,39 @@ export default function extension(pi: ExtensionAPI): void {
       ctx.ui.notify(lines.join("\n"), "info");
     },
   });
+
+  pi.registerCommand("state:force-refresh", {
+    description: "Clear this session's lock row and this process's cache",
+    handler: async (
+      _args: string,
+      ctx: ExtensionCommandContext,
+    ): Promise<void> => {
+      const sessionId = ctx.sessionManager.getSessionId();
+      const lock = store.inspectSession(sessionId).lock;
+      if (lock !== undefined && holderIsAlive(lock.holder)) {
+        if (!ctx.hasUI) return;
+        const confirmed = await ctx.ui.confirm(
+          "session-state: clear the session lock?",
+          `The lock row is held by ${lock.holder}, which is still alive. Clear it anyway?`,
+        );
+        if (!confirmed) {
+          ctx.ui.notify(
+            "session-state: /state:force-refresh cancelled; the lock row was kept",
+            "warning",
+          );
+          return;
+        }
+      }
+      store.releaseSessionLock(sessionId);
+      store.dropSessionCache(sessionId);
+      if (ctx.hasUI) {
+        ctx.ui.notify(
+          `session-state: /state:force-refresh removed the lock row (holder ${
+            lock?.holder ?? "none"
+          }) and this process's cache; the next read comes from disk`,
+          "info",
+        );
+      }
+    },
+  });
 }
