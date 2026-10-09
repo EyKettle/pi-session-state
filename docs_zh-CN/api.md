@@ -7,7 +7,7 @@
 ## 接入
 
 ```ts
-import { openSessionState } from "session-state";
+import { openSessionState } from "pi-session-state";
 
 const state = openSessionState<Identity>({ pluginId: "role" });
 ```
